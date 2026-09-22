@@ -123,7 +123,9 @@ class FaceSwapVideo:
 
         gray = cv2.cvtColor(self.source_image, cv2.COLOR_BGR2GRAY)
         self.source_landmarks = fit_landmarks(
-            box, self.detector.detect_eyes(gray, box)
+            box,
+            self.detector.detect_eyes(gray, box),
+            self.detector.detect_mouth(gray, box),
         )
         # Triangulate once, in source space: both faces share this topology.
         self.triangles = triangulate(
@@ -139,6 +141,7 @@ class FaceSwapVideo:
         self._last_points: np.ndarray | None = None
         self._detect_calls = 0
         self._multi_face_checked = False
+        self._last_mouth: tuple[tuple[float, float], tuple[float, float]] | None = None
 
     def _detect_frame(self, frame: np.ndarray, index: int) -> FaceBox | None:
         opts = self.options
@@ -154,6 +157,21 @@ class FaceSwapVideo:
             box = self.detector.detect(frame)
         self._last_box = box
         return box
+
+    def _measure_mouth(self, gray: np.ndarray, box: FaceBox, index: int):
+        """Mouth corners for this frame, re-measured on the detection cadence.
+
+        Mouth detection costs about as much as eye detection, so it rides the
+        same every-N-frames schedule as the face box and is reused in between.
+        The mouth barely moves over a few frames, and the landmark smoothing
+        below removes what little jitter remains.
+        """
+        opts = self.options
+        if self._last_mouth is not None and index % opts.detect_every != 0:
+            return self._last_mouth
+        mouth = self.detector.detect_mouth(gray, box)
+        self._last_mouth = mouth
+        return mouth
 
     def process(self, input_path: str | Path, output_path: str | Path) -> SwapStats:
         opts = self.options
@@ -253,7 +271,11 @@ class FaceSwapVideo:
             return frame
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        target = fit_landmarks(box, self.detector.detect_eyes(gray, box))
+        target = fit_landmarks(
+            box,
+            self.detector.detect_eyes(gray, box),
+            self._measure_mouth(gray, box, index),
+        )
 
         templates = self.source_landmarks.points
         # Temporal smoothing: blend the new fit with the previous one so the

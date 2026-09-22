@@ -23,8 +23,18 @@ detection ship inside the OpenCV wheel.
 | Never | downloads models, needs a GPU, or phones home |
 
 The swap is a real deformation: the source face is rasterised triangle by
-triangle onto the target's features, so expressions, head angle and mouth
-position follow the target. It is not a sticker or a cut-out pasted on top.
+triangle onto the target's features, so the source's own internal proportions
+are reshaped to the target's - a wide mouth on the target stretches the
+source's mouth. It is not a sticker or a cut-out pasted on top.
+
+For that to be true the target's landmarks must be *measured*, not assumed.
+The mouth corners come from the smile cascade, so mouth width, height and
+position are per-face measurements. `tests/test_deformation.py` guards this:
+it asserts that two different people's landmark sets are **not** related by a
+similarity transform (a rotate/scale/translate fit leaves a residual of
+0.05-0.16, where a fixed template would leave exactly 0.0), and it measures the
+warped mouth in the output pixels to confirm it comes out at the target's
+width rather than the source's.
 
 ## Requirements
 
@@ -113,15 +123,19 @@ runs on a machine with no Python installed. For the Windows 8.1 runbook, see
 ## How it works
 
 1. **Detect.** The target's largest frontal face is found with a Haar cascade
-   on a downscaled grey frame. Eyes are found inside the upper 60% of that box.
+   on a downscaled grey frame. Eyes are found inside the upper 60% of that box,
+   and the mouth is found in the lower half by the smile cascade.
 2. **Fit landmarks.** A fourteen-point layout - eyes, brows, nose bridge and
    tip, mouth corners and centre, chin, jaw and cheeks - is fitted to the box,
    scaled by the measured eye distance and rotated to the measured eye line.
-   Because every landmark is expressed as a multiple of interocular distance, a
-   4000 px portrait and a 60 px video face land on identical topology.
+   The eye landmarks are replaced by the measured eye centres and the mouth
+   landmarks by the measured mouth corners, so the target contributes real
+   per-face geometry rather than accepting a template. Because the layout is
+   expressed as multiples of interocular distance, a 4000 px portrait and a
+   60 px video face still land on matching topology.
 3. **Deform.** The source landmarks are triangulated with Delaunay once. Each
    triangle is affine-warped to its destination, so the source pixels are
-   stretched onto the target's geometry rather than overlaid.
+   stretched onto the target's measured geometry rather than overlaid.
 4. **Match colour.** Source and target are compared in CIELAB inside the blend
    mask; the mean is shifted and the standard deviation scaled so the face takes
    on the target's exposure and skin tone without losing its detail.

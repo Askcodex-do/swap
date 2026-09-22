@@ -19,6 +19,16 @@ import numpy as np
 _FRONTAL_CASCADE = "haarcascade_frontalface_alt2.xml"
 _PROFILE_CASCADE = "haarcascade_profileface.xml"
 _EYE_CASCADE = "haarcascade_eye.xml"
+_MOUTH_CASCADE = "haarcascade_smile.xml"
+
+#: Eye line as a fraction of the Haar box height, used as the reference when no
+#: eye measurement is available.
+_EYE_LINE_FROM_BOX = 0.39
+
+#: Accepted mouth width as a fraction of the face box width.  The smile cascade
+#: also fires on nostrils and chin creases, and this keeps such a false positive
+#: from wrecking the geometry.
+_MOUTH_WIDTH_RANGE = (0.20, 0.62)
 
 
 def _cascade_search_paths(name: str) -> list[str]:
@@ -103,6 +113,7 @@ class FaceDetector:
         self._frontal = load_cascade(_FRONTAL_CASCADE)
         self._profile = load_cascade(_PROFILE_CASCADE) if profile_fallback else None
         self._eyes = load_cascade(_EYE_CASCADE)
+        self._mouth = load_cascade(_MOUTH_CASCADE)
         self._scale_factor = scale_factor
         self._min_neighbors = min_neighbors
         self._min_face_ratio = min_face_ratio
@@ -301,3 +312,70 @@ class FaceDetector:
         w = max(1, min(box.w, width - x))
         h = max(1, min(box.h, height - y))
         return FaceBox(x, y, w, h)
+
+    def detect_mouth(
+        self, gray: np.ndarray, face: FaceBox
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+        """Measured mouth corners inside ``face``, or ``None``.
+
+        This is what makes the swap a real deformation rather than a paste.  A
+        fixed landmark template is the same shape on every person, so warping
+        onto it can only ever rotate, scale and translate the source - the
+        source's own mouth-to-eye proportions survive untouched.  Measuring the
+        mouth gives the target face genuine internal geometry, so a wide mouth
+        on the target actually stretches the source's mouth.
+
+        The smile cascade fires on nostrils and chin creases as well as mouths,
+        so candidates are scored on position (centred under the eyes, in the
+        lower half of the face) and plausible width, and the best is returned.
+        """
+        x0, y0 = max(0, face.x), max(0, face.y)
+        x1 = min(gray.shape[1], face.x + face.w)
+        y1 = min(gray.shape[0], face.y + face.h)
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            return None
+
+        # The mouth lives in the lower half of the face.
+        top = y0 + int(round((y1 - y0) * 0.5))
+        roi = gray[top:y1, x0:x1]
+        if roi.size == 0:
+            return None
+
+        found = self._mouth.detectMultiScale(
+            roi,
+            scaleFactor=1.05,
+            minNeighbors=12,
+            minSize=(max(8, (x1 - x0) // 6), max(8, (y1 - y0) // 10)),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+        if len(found) == 0:
+            return None
+
+        cx_face = face.x + face.w / 2.0
+        eye_line = face.y + face.h * _EYE_LINE_FROM_BOX
+        lo, hi = _MOUTH_WIDTH_RANGE
+
+        best: tuple[float, float, float] | None = None
+        for (mx, my, mw, mh) in found:
+            rel_w = mw / float(face.w)
+            if not lo <= rel_w <= hi:
+                continue
+            cx = mx + mw / 2.0 + x0
+            cy = my + mh / 2.0 + top
+            # Reject anything not centred under the eyes and below them.
+            if abs(cx - cx_face) > 0.16 * face.w:
+                continue
+            below = (cy - eye_line) / float(face.h)
+            if not 0.15 <= below <= 0.65:
+                continue
+            # Prefer the widest plausible candidate; the real mouth is the
+            # widest thing in that region.
+            if best is None or mw > best[0]:
+                best = (mw, cx, cy)
+
+        if best is None:
+            return None
+
+        _, cx, cy = best
+        half = best[0] / 2.0
+        return ((cx - half, cy), (cx + half, cy))

@@ -93,6 +93,26 @@ def test_mouth_measurements_override_the_layout():
     assert np.allclose(measured.points[6], [100.0, 150.0], atol=1e-4)
 
 
+def test_implausible_mouth_measurement_is_rejected():
+    """The smile cascade also fires on chins and nostrils.  A mouth landing
+    below the chin would invert triangles and tear the mesh, so the
+    proportional layout must win instead."""
+    box = FaceBox(0, 0, 200, 200)
+    plain = S.fit_landmarks(box)
+
+    # Far below the chin (y ~ 1.74 eye units below the eye line).
+    below = S.fit_landmarks(box, mouth=[(60.0, 900.0), (140.0, 900.0)])
+    assert np.allclose(below.points[4], plain.points[4], atol=1e-4)
+
+    # Above the nose bridge.
+    above = S.fit_landmarks(box, mouth=[(60.0, -500.0), (140.0, -500.0)])
+    assert np.allclose(above.points[4], plain.points[4], atol=1e-4)
+
+    # A plausible mouth between nose tip and chin is still honoured.
+    good = S.fit_landmarks(box, mouth=[(70.0, 150.0), (130.0, 150.0)])
+    assert not np.allclose(good.points[4], plain.points[4])
+
+
 def test_mean_landmarks_averages():
     a = S.fit_landmarks(FaceBox(0, 0, 100, 100))
     b = S.fit_landmarks(FaceBox(20, 20, 100, 100))

@@ -124,9 +124,15 @@ def fit_landmarks(
 
     if mouth and len(mouth) == 2:
         m_left, m_right = sorted(mouth, key=lambda p: p[0])
-        pts[_MOUTH_LEFT] = m_left
-        pts[_MOUTH_RIGHT] = m_right
-        pts[6] = ((m_left[0] + m_right[0]) / 2.0, (m_left[1] + m_right[1]) / 2.0)
+        m_y = (m_left[1] + m_right[1]) / 2.0
+        # The smile cascade sometimes fires on a chin crease or a nostril.  A
+        # mouth that lands above the nose tip or below the chin would invert
+        # triangles and tear the mesh, so such a measurement is discarded and
+        # the proportional layout is kept instead.
+        if pts[2][1] < m_y < pts[7][1]:
+            pts[_MOUTH_LEFT] = m_left
+            pts[_MOUTH_RIGHT] = m_right
+            pts[6] = ((m_left[0] + m_right[0]) / 2.0, m_y)
 
     return FaceLandmarks(
         points=pts,
