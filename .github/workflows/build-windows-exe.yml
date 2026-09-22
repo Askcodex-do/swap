@@ -1,0 +1,226 @@
+name: build-windows-exe
+
+# Builds the real Windows PE faceswap.exe on a Windows runner.
+#
+# PyInstaller cannot cross-compile, so the Windows executable must be produced
+# on Windows. This workflow does that on GitHub's windows-latest image, using
+# the exact pinned versions from WINDOWS.md (Python 3.10.11, PyInstaller
+# 5.13.2), proves the result is a genuine PE binary, smoke-tests it, and
+# attaches it to the release under a clearly Windows-labelled filename.
+#
+# It only ever ADDS an asset. The Linux asset is never touched or replaced.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the Windows build to"
+        required: true
+        default: "v1.0.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+      RELEASE_ASSET: faceswap-1.0.0-windows-x86_64.zip
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out the exact commit being built
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: Set up Python 3.10.11 (last 3.10 with a Windows installer)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.11"
+
+      - name: Report the toolchain actually in use
+        run: |
+          python --version
+          python -c "import sys, platform; print('platform:', sys.platform, platform.machine()); print('bits:', 64 if sys.maxsize > 2**32 else 32)"
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -c "import cv2, numpy, PyInstaller; print('opencv', cv2.__version__); print('numpy', numpy.__version__); print('pyinstaller', PyInstaller.__version__)"
+
+      - name: Run the test suite before building
+        run: python -m pytest tests/ -q
+
+      - name: Build the exe
+        run: python make_exe.py
+
+      - name: Assert the output is a genuine Windows PE binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import struct, sys, pathlib
+
+          path = pathlib.Path("dist/faceswap.exe")
+          problems = []
+
+          if not path.is_file():
+              problems.append(f"{path} does not exist")
+          else:
+              data = path.read_bytes()
+
+              if data[:2] != b"MZ":
+                  problems.append(f"not a PE binary: expected magic b'MZ', got {data[:2]!r}")
+
+              e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+              if data[e_lfanew:e_lfanew + 4] != b"PE\x00\x00":
+                  problems.append(
+                      f"missing PE signature at 0x{e_lfanew:x}: got {data[e_lfanew:e_lfanew+4]!r}"
+                  )
+              else:
+                  machine = struct.unpack_from("<H", data, e_lfanew + 4)[0]
+                  # Subsystem sits at offset 68 of the optional header, PE32 and PE32+ alike.
+                  subsystem = struct.unpack_from("<H", data, e_lfanew + 4 + 20 + 68)[0]
+
+                  names = {0x014C: "i386", 0x8664: "x86-64", 0xAA64: "arm64"}
+                  print(f"magic          : {data[:2]!r}")
+                  print(f"PE signature   : {data[e_lfanew:e_lfanew+4]!r}")
+                  print(f"machine        : 0x{machine:04x} ({names.get(machine, 'unknown')})")
+                  print(f"subsystem      : {subsystem} "
+                        f"({'console' if subsystem == 3 else 'NOT a console app'})")
+                  print(f"size           : {len(data):,} bytes")
+
+                  if machine not in names:
+                      problems.append(f"unexpected machine type 0x{machine:04x}")
+                  if subsystem != 3:
+                      problems.append(
+                          f"expected a console subsystem (3), got {subsystem}"
+                      )
+
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+
+          print("OK: dist/faceswap.exe is a real Windows PE console executable")
+          PY
+
+      - name: Smoke-test the exe end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import cv2, sys
+          sys.path.insert(0, ".")
+          from tests.test_pipeline import make_video
+          make_video("smoke_clip.mp4", cv2.imread("tests/data/lena_opencv_sample.jpg"))
+          print("smoke clip written")
+          PY
+
+          echo "--- version ---"
+          ./dist/faceswap.exe --version
+
+          echo "--- real swap through the exe ---"
+          ./dist/faceswap.exe -s tests/data/obama.jpg -t smoke_clip.mp4 -o smoke_out.mp4
+
+          python - <<'PY'
+          import cv2, sys
+
+          cap = cv2.VideoCapture("smoke_out.mp4")
+          frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+          w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+          h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+          cap.release()
+
+          raw = open("smoke_out.mp4", "rb").read()
+          has_audio = any(tag in raw for tag in (b"mp4a", b"soun", b".mp3", b"ac-3"))
+
+          print(f"output: {frames} frames, {w}x{h}")
+          print(f"audio track present: {has_audio}")
+
+          if frames != 24:
+              print(f"::error::expected 24 frames, got {frames}")
+              sys.exit(1)
+          if has_audio:
+              print("::error::output unexpectedly contains an audio track")
+              sys.exit(1)
+
+          print("OK: the exe swapped every frame and wrote no audio")
+          PY
+
+      - name: Package the Windows artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, os, zipfile
+
+          name = os.environ["RELEASE_ASSET"]
+          inner = "faceswap-1.0.0-windows-x86_64"
+
+          files = [
+              ("dist/faceswap.exe", f"{inner}/faceswap.exe"),
+              ("README.md", f"{inner}/README.md"),
+              ("WINDOWS.md", f"{inner}/WINDOWS.md"),
+          ]
+
+          with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for src, arc in files:
+                  z.write(src, arc)
+
+          digest = hashlib.sha256(open(name, "rb").read()).hexdigest()
+          size = os.path.getsize(name)
+          print(f"packaged {name}: {size:,} bytes")
+          print(f"sha256: {digest}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write("## Windows build\n\n")
+              fh.write(f"- asset: `{name}`\n")
+              fh.write(f"- size: {size:,} bytes\n")
+              fh.write(f"- sha256: `{digest}`\n")
+              fh.write("- `dist/faceswap.exe` verified as PE/MZ console x86-64\n")
+          PY
+
+      - name: Keep the zip as a workflow artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: faceswap-windows-x86_64
+          path: faceswap-1.0.0-windows-x86_64.zip
+          if-no-files-found: error
+
+      - name: Attach to the release without disturbing existing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "target release: $RELEASE_TAG"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName'
+
+          echo "--- assets before ---"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name'
+
+          # Only ever adds/replaces this one Windows asset. --clobber lets a
+          # re-run replace its own artifact; it cannot touch the Linux asset
+          # because the filename differs.
+          gh release upload "$RELEASE_TAG" "$RELEASE_ASSET" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          echo "--- assets after ---"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name'
+
+          count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets | length')
+          if [ "$count" -lt 2 ]; then
+            echo "::error::expected at least 2 release assets after upload, found $count"
+            exit 1
+          fi
+          echo "OK: release now carries $count assets"
