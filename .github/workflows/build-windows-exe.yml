@@ -68,8 +68,7 @@ jobs:
         run: python -m pytest tests/ -q
 
       - name: Print the deformation evidence for this build
-        run: |
-          python -c "import sys; sys.path.insert(0, '.'); exec(open('tools/deform_report.py').read())"
+        run: python tools/deform_report.py
 
       - name: Build the exe
         run: python make_exe.py

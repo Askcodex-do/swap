@@ -79,9 +79,10 @@ def main() -> None:
 
     if spread > 0.15 and worst > 0.02:
         print("VERDICT: the warp reshapes internal geometry - a real deformation.")
-    else:
-        print("VERDICT: FAILED - this build pastes rather than deforms.")
+        return 0
+    print("VERDICT: FAILED - this build pastes rather than deforms.")
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
