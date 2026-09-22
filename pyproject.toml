@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faceswap"
+version = "1.0.0"
+description = "Offline face-swap video converter using classic OpenCV techniques, no neural networks"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.22,<2",
+    "opencv-python-headless>=4.5,<5",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Multimedia :: Video",
+    "Environment :: Win32 (MS Windows)",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=5.13,<7"]
+test = ["pytest>=7"]
+
+[project.scripts]
+faceswap = "faceswap.cli:main"
+
+[tool.setuptools]
+packages = ["faceswap"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::RuntimeWarning"]

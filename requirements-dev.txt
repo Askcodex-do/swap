@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Build tooling. On Windows 8.1 / Python 3.7 both of these must stay pinned:
+# PyInstaller 6 dropped Python 3.7, and NumPy 2 dropped it as well.
+pyinstaller==5.13.2
+pytest>=7

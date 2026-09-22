@@ -1,0 +1,12 @@
+# Offline face-swap video converter.
+#
+# Only two dependencies, both pure wheels with no CUDA, no ONNX, no
+# insightface, and no downloaded model weights:
+#   * numpy  - array maths
+#   * opencv-python-headless - detection, warping and blending; the Haar
+#     cascade XMLs used for face detection ship inside this wheel
+#
+# The headless build is deliberate: no GUI/Qt libraries, which keeps the
+# download and the eventual exe much smaller.
+numpy>=1.22,<2
+opencv-python-headless>=4.5,<5
