@@ -26,6 +26,7 @@ def test_bundled_cascades_load_without_download():
         "haarcascade_frontalface_alt2.xml",
         "haarcascade_eye.xml",
         "haarcascade_profileface.xml",
+        "haarcascade_smile.xml",
     ):
         cascade = load_cascade(name)
         assert not cascade.empty()

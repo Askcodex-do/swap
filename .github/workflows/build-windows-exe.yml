@@ -30,10 +30,19 @@ jobs:
 
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-      RELEASE_ASSET: faceswap-1.0.0-windows-x86_64.zip
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
+      - name: Work out the versioned asset name from the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_ASSET=faceswap-${version}-windows-x86_64.zip" >> "$GITHUB_ENV"
+          echo "INNER_DIR=faceswap-${version}-windows-x86_64" >> "$GITHUB_ENV"
+          echo "tag=$RELEASE_TAG version=$version"
+
       - name: Check out the exact commit being built
         uses: actions/checkout@v4
         with:
@@ -57,6 +66,10 @@ jobs:
 
       - name: Run the test suite before building
         run: python -m pytest tests/ -q
+
+      - name: Print the deformation evidence for this build
+        run: |
+          python -c "import sys; sys.path.insert(0, '.'); exec(open('tools/deform_report.py').read())"
 
       - name: Build the exe
         run: python make_exe.py
@@ -163,7 +176,7 @@ jobs:
           import hashlib, os, zipfile
 
           name = os.environ["RELEASE_ASSET"]
-          inner = "faceswap-1.0.0-windows-x86_64"
+          inner = os.environ["INNER_DIR"]
 
           files = [
               ("dist/faceswap.exe", f"{inner}/faceswap.exe"),
@@ -192,7 +205,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: faceswap-windows-x86_64
-          path: faceswap-1.0.0-windows-x86_64.zip
+          path: faceswap-*-windows-x86_64.zip
           if-no-files-found: error
 
       - name: Attach to the release without disturbing existing assets
@@ -201,11 +214,18 @@ jobs:
           set -euo pipefail
 
           echo "target release: $RELEASE_TAG"
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName'
+          # Create the release if this tag does not have one yet, so a fresh
+          # version works without a manual step.  Creating is a no-op if it
+          # already exists.
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG does not exist yet; creating it"
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "faceswap $RELEASE_VERSION" --generate-notes
+          fi
 
           echo "--- assets before ---"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name'
+            --jq '.assets[].name' | tee /tmp/before.txt
 
           # Only ever adds/replaces this one Windows asset. --clobber lets a
           # re-run replace its own artifact; it cannot touch the Linux asset
@@ -217,10 +237,20 @@ jobs:
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[].name'
 
+          # The Linux asset must still be there if it was there before.
+          if grep -q 'linux' /tmp/before.txt; then
+            if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                 --json assets --jq '.assets[].name' | grep -q 'linux'; then
+              echo "::error::the Linux asset disappeared from the release"
+              exit 1
+            fi
+            echo "OK: Linux asset still present alongside the Windows one"
+          fi
+
           count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets | length')
-          if [ "$count" -lt 2 ]; then
-            echo "::error::expected at least 2 release assets after upload, found $count"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::no release assets after upload"
             exit 1
           fi
           echo "OK: release now carries $count assets"
