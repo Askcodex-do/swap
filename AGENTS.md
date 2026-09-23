@@ -86,6 +86,26 @@ PYTHONPATH=. python -m pytest tests/ -q
   through LAB perturbs pixels outside the mask.
 * Landmark proportions are anchored to the **measured** interocular/box-width
   ratio (`_INTEROCULAR_OVER_BOX_W`), not "half the box width".
+* **A rolled head is retried on rotated copies** (`FaceDetector._detect_tilted`,
+  angles in `_TILT_ANGLES`). The upright frontal cascade tolerates only about
+  +-10 degrees of roll, so a clip that opens with the head turned produced *no
+  face at all* on those frames and kept the original face. The retry is a
+  fallback only - never the first attempt - because it costs ~124 ms on a
+  320x240 frame with no face in it, against ~14 ms for a tracked local search.
+  A box found in a rotated frame is mapped back through the inverse rotation, so
+  callers always see upright coordinates. Validated for recall (35/40 -> 40/40 on
+  a moving-face clip) *and* precision (flat grey, black, noise, checkerboard and
+  gradient images still return `None`). See `tests/test_detector.py` and
+  `tests/test_motion.py`.
+* The **cheek/jaw/chin outline is still a proportional template**, and that is
+  deliberate. Measuring it from the image was tried and rejected: a
+  Cr/Cb skin mask plus a per-row scan for the outline leaked into a beige
+  background (obama: measured "face" width 2.68 eye-units, i.e. the whole frame)
+  and found no skin at all on the grayscale `lena` sample. Without a learned
+  segmentation model, background and face are not separable in that region, so a
+  bad measurement is worse than a good template. Do not re-add a skin-tone jaw
+  scan. What *is* measured per face is the eyes and the mouth (smile cascade);
+  see `tests/test_deformation.py`.
 * PyInstaller 6 does not auto-collect `secrets`, which strands numpy through
   `numpy.random`. See `hiddenimports` in `faceswap.spec`.
 

@@ -94,6 +94,71 @@ def test_no_face_returns_none(detector):
     assert detector.detect(np.zeros((0, 0, 3), np.uint8)) is None
 
 
+def test_negative_images_still_return_no_face(detector):
+    """The rotated retry must not invent faces on images that have none.
+
+    It only runs when the upright cascade fails, which is exactly the situation
+    on a featureless image, so this is the case where a sloppy fallback would
+    start producing false positives.
+    """
+    rng = np.random.default_rng(0)
+    ramp = np.tile(np.linspace(0, 255, 320, dtype=np.uint8), (240, 1))
+    negatives = {
+        "flat grey": np.full((240, 320), 120, np.uint8),
+        "black": np.zeros((240, 320), np.uint8),
+        "uniform noise": rng.integers(0, 256, (240, 320), dtype=np.uint8),
+        "checkerboard": (np.indices((240, 320)).sum(axis=0) % 2 * 255).astype(np.uint8),
+        "gradient": ramp,
+    }
+    for name, gray in negatives.items():
+        assert detector.detect(gray) is None, f"false face found in {name}"
+
+
+@pytest.mark.parametrize("angle", [-25.0, 25.0])
+def test_tilted_head_is_recovered_when_upright_detection_fails(detector, angle):
+    """A head roll of about 25 degrees defeats the frontal cascade.
+
+    Without a retry those frames get no swap at all - a clip that opens with the
+    head turned keeps the original face for its first seconds.  The detector must
+    recover the face; the assertion that the cascade alone finds nothing is what
+    keeps this test honest about why the fallback exists.
+    """
+    from faceswap.detector import load_cascade
+
+    img = load("obama")
+    box = detector.detect(img)
+    pad = int(box.w * 0.5)
+    y0, x0 = max(0, box.y - pad), max(0, box.x - pad)
+    crop = img[y0 : box.y + box.h + pad, x0 : box.x + box.w + pad]
+    side = min(crop.shape[:2])
+    face = cv2.resize(crop[:side, :side], (90, 90), interpolation=cv2.INTER_AREA)
+
+    h, w = 240, 320
+    ramp = np.linspace(0, 200, w, dtype=np.float32)
+    frame = cv2.cvtColor(np.tile(ramp, (h, 1)).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    matrix = cv2.getRotationMatrix2D((45.0, 45.0), angle, 1.0)
+    rolled = cv2.warpAffine(face, matrix, (90, 90), borderMode=cv2.BORDER_REPLICATE)
+    px, py = 170, 85
+    frame[py : py + 90, px : px + 90] = rolled
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upright = detector._frontal.detectMultiScale(gray, 1.1, 5, minSize=(16, 16))
+    assert len(upright) == 0, (
+        "this test only means something if the upright cascade misses the "
+        "rolled head; the cascade got better, so pick a larger angle"
+    )
+
+    found = detector.detect(frame)
+    assert found is not None, f"tilted face at {angle:+.0f} degrees was not recovered"
+
+    # It must be the planted face, not something else in the frame.
+    ax0, ay0, ax1, ay1 = px, py, px + 90, py + 90
+    bx0, by0 = found.x, found.y
+    bx1, by1 = found.x + found.w, found.y + found.h
+    inter = max(0, min(ax1, bx1) - max(ax0, bx0)) * max(0, min(ay1, by1) - max(ay0, by0))
+    assert inter > 0, f"recovered box {found} does not overlap the planted face"
+
+
 def test_largest_face_wins(detector, face_obama, obama_box):
     """With the same face pasted twice at different sizes, the big one wins."""
     pad = int(obama_box.w * 0.5)

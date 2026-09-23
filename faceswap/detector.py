@@ -21,6 +21,12 @@ _PROFILE_CASCADE = "haarcascade_profileface.xml"
 _EYE_CASCADE = "haarcascade_eye.xml"
 _MOUTH_CASCADE = "haarcascade_smile.xml"
 
+#: Rotations, in degrees, retried only when the upright cascade finds nothing.
+#: The frontal cascade tolerates roughly +-10 degrees of head roll, so a clip
+#: that opens with the head turned gets no face at all on those frames.  A small
+#: sweep recovers them; it is not tried first because it is the expensive path.
+_TILT_ANGLES: tuple[int, ...] = (-12, 12, -24, 24)
+
 #: Eye line as a fraction of the Haar box height, used as the reference when no
 #: eye measurement is available.
 _EYE_LINE_FROM_BOX = 0.39
@@ -141,6 +147,57 @@ class FaceDetector:
 
         return boxes
 
+    def _detect_tilted(
+        self, gray: np.ndarray, offset: tuple[int, int], min_size: int
+    ) -> list[FaceBox]:
+        """Retry detection with the frame rotated, for a rolled head.
+
+        Only called when the upright cascades find nothing.  A box found in a
+        rotated frame is turned back into the original coordinates by mapping
+        its corners through the inverse rotation, so the caller always gets
+        upright pixel coordinates.
+        """
+        h, w = gray.shape[:2]
+        centre = (w / 2.0, h / 2.0)
+        boxes: list[FaceBox] = []
+
+        for angle in _TILT_ANGLES:
+            matrix = cv2.getRotationMatrix2D(centre, angle, 1.0)
+            rotated = cv2.warpAffine(
+                gray, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE
+            )
+            found = self._frontal.detectMultiScale(
+                rotated,
+                scaleFactor=self._scale_factor,
+                minNeighbors=self._min_neighbors,
+                minSize=(min_size, min_size),
+                flags=cv2.CASCADE_SCALE_IMAGE,
+            )
+            if len(found) == 0:
+                continue
+
+            inverse = cv2.invertAffineTransform(matrix)
+            for (x, y, bw, bh) in found:
+                corners = np.array(
+                    [[x, y], [x + bw, y], [x, y + bh], [x + bw, y + bh]],
+                    dtype=np.float32,
+                ).reshape(-1, 1, 2)
+                back = cv2.transform(corners, inverse).reshape(-1, 2)
+                x0, y0 = back[:, 0].min(), back[:, 1].min()
+                x1, y1 = back[:, 0].max(), back[:, 1].max()
+                boxes.append(
+                    FaceBox(
+                        int(round(x0 + offset[0])),
+                        int(round(y0 + offset[1])),
+                        max(1, int(round(x1 - x0))),
+                        max(1, int(round(y1 - y0))),
+                    )
+                )
+            if boxes:
+                break
+
+        return boxes
+
     def detect(
         self,
         image_bgr: np.ndarray,
@@ -195,6 +252,11 @@ class FaceDetector:
             16, int(round(min(search_small.shape[:2]) * self._min_face_ratio))
         )
         boxes = self._detect_in(search_small, offset, min_size)
+
+        if not boxes:
+            # Nothing upright.  A rolled head is the common cause, so retry on
+            # rotated copies before giving up on the frame.
+            boxes = self._detect_tilted(search_small, offset, min_size)
 
         if not boxes:
             return None

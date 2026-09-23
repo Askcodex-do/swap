@@ -22,6 +22,35 @@ detection ship inside the OpenCV wheel.
 | Refuses | sources or clips showing more than one face |
 | Never | downloads models, needs a GPU, or phones home |
 
+### Limitations, stated plainly
+
+This is a classical (non-neural) swapper, so it is honest about its ceiling.
+It warps the source's *pixels* onto the target's measured geometry - it does not
+re-synthesise the target's skin, lighting or expression. Concretely:
+
+* **A change of head pose between source and target is not corrected.** If the
+  source photo is very frontal and the target turns its head, the result is a
+  warped photo face, not a re-rendered one. Keep the source pose close to the
+  target's.
+* **Fine skin texture and lighting come from the source photo**, then colour
+  is matched to the target. A very different skin tone or a hard light on the
+  target will not look photographic.
+* **The eyes are measured, and so is the mouth, but the cheek/jaw/chin outline
+  is a proportional template.** Measuring the outline from the image was tried
+  and rejected: a skin-tone scan cannot separate a face from a similar-coloured
+  background without a learned segmentation model, and a wrong outline is worse
+  than a good template. See `AGENTS.md`.
+* **Frontal faces only.** A profile or a strongly tilted head will not detect or
+  will fit badly. Roll (a head tilted sideways in the picture plane) up to about
+  25 degrees *is* handled - the detector retries on rotated copies - but yaw
+  (looking away from the camera) is not, because only one face centre is ever
+  measured.
+
+If you need photoreal, pose-corrected swapping, that needs a learned model
+(`inswapper_128` and friends), which is ~500 MB and needs ONNX Runtime - and
+ONNX Runtime requires Windows 10 1809 or newer. That combination is what this
+project deliberately avoids: it will not run on 2 GB of RAM and Windows 8.1.
+
 The swap is a real deformation: the source face is rasterised triangle by
 triangle onto the target's features, so the source's own internal proportions
 are reshaped to the target's - a wide mouth on the target stretches the
