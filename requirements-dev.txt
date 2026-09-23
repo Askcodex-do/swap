@@ -3,4 +3,13 @@
 # Build tooling. On Windows 8.1 / Python 3.7 both of these must stay pinned:
 # PyInstaller 6 dropped Python 3.7, and NumPy 2 dropped it as well.
 pyinstaller==5.13.2
-pytest>=7
+pyinstaller-hooks-contrib==2026.7
+pytest==7.4.4
+typing-extensions==4.16.0
+exceptiongroup==1.3.1
+iniconfig==2.1.0
+pluggy==1.6.0
+packaging==26.3
+# PyInstaller 5.13.2 imports pkg_resources at startup, which setuptools removed
+# in 81. Without this pin the build fails on a fresh runner.
+setuptools<81

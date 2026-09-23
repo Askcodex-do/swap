@@ -17,6 +17,11 @@ on:
         description: "Release tag to attach the Windows build to"
         required: true
         default: "v1.0.0"
+      attach_to_release:
+        description: "Upload the built zip to the release (untick to only build and verify)"
+        type: boolean
+        required: false
+        default: true
   push:
     tags:
       - "v*"
@@ -31,6 +36,21 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # These two make the build reproducible; without them two builds of the
+      # same commit produce different bytes.
+      #
+      # PYTHONHASHSEED: Python 3.10's marshal writes set/frozenset contents in
+      # raw hash order, so any set literal in the source - ours or the standard
+      # library's - compiles to different bytes each run. In this project that
+      # hit 12 modules (cli.py plus stdlib modules like typing, tarfile, pydoc).
+      # CPython only sorts set elements at marshal time from 3.13, so on 3.10
+      # the seed has to be pinned.
+      #
+      # SOURCE_DATE_EPOCH: PyInstaller stamps the PE header with the current
+      # time unless this is set, and then rewrites the file, which also changes
+      # the PE checksum.
+      PYTHONHASHSEED: "0"
+      SOURCE_DATE_EPOCH: "315532800"
 
     outputs:
       asset: ${{ steps.package.outputs.asset }}
@@ -131,6 +151,30 @@ jobs:
           print("OK: dist/faceswap.exe is a real Windows PE console executable")
           PY
 
+      - name: Prove the build is reproducible
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build a second time from the same source and require the same bytes.
+          # This is the check that would have caught the earlier problem, where a
+          # rerun produced a different exe and a different zip.
+          cp dist/faceswap.exe /tmp/first.exe
+          first=$(sha256sum dist/faceswap.exe | cut -d' ' -f1)
+
+          python make_exe.py
+
+          second=$(sha256sum dist/faceswap.exe | cut -d' ' -f1)
+          echo "first  build: $first"
+          echo "second build: $second"
+
+          if [ "$first" != "$second" ]; then
+            echo "::error::two builds of the same commit produced different exe bytes, so the build is not reproducible"
+            echo "::error::$(wc -c < /tmp/first.exe) bytes vs $(wc -c < dist/faceswap.exe) bytes"
+            exit 1
+          fi
+
+          echo "OK: rebuilding this commit reproduces the same exe byte for byte"
+
       - name: Smoke-test the exe end to end
         shell: bash
         run: |
@@ -191,9 +235,25 @@ jobs:
               ("WINDOWS.md", f"{inner}/WINDOWS.md"),
           ]
 
+          # Fixed date on every member instead of the file's mtime, plus a fixed
+          # create_system and permission bits, so the zip bytes don't move just
+          # because it was packed at a different moment. The date is an arbitrary
+          # constant; only its stability matters, and 1980-01-01 is the earliest
+          # a zip can express.
+          STAMP = (1980, 1, 1, 0, 0, 0)
+
           with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
               for src, arc in files:
-                  z.write(src, arc)
+                  info = zipfile.ZipInfo(arc, date_time=STAMP)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.create_system = 0  # MS-DOS, regardless of where it is built
+                  info.external_attr = 0o100644 << 16  # plain file, not executable
+                  with open(src, "rb") as fh, z.open(info, "w") as dst:
+                      while True:
+                          chunk = fh.read(1 << 20)
+                          if not chunk:
+                              break
+                          dst.write(chunk)
 
           def digest(path):
               h = hashlib.sha256()
@@ -308,6 +368,7 @@ jobs:
           compression-level: 0
 
       - name: Attach to the release without disturbing existing assets
+        if: github.event_name != 'workflow_dispatch' || inputs.attach_to_release
         shell: bash
         run: |
           set -euo pipefail

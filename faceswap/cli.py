@@ -12,9 +12,15 @@ from pathlib import Path
 from . import __version__
 from .pipeline import FaceSwapVideo, SwapOptions
 
-VIDEO_SUFFIXES = {
+# A tuple, deliberately, not a set. Membership tests read the same either way,
+# but a set literal is stored in the compiled module as a frozenset constant,
+# and Python 3.10's marshal writes set elements in raw hash order. That order
+# changes whenever hash randomisation is active, which makes the bundled
+# bytecode - and so the exe - differ between builds of the same source.
+# CPython only started sorting set elements at marshal time in 3.13 (bpo-37596).
+VIDEO_SUFFIXES = (
     ".mp4", ".avi", ".mov", ".mkv", ".webm", ".wmv", ".flv", ".m4v", ".mpg", ".mpeg",
-}
+)
 
 
 def build_parser() -> argparse.ArgumentParser:

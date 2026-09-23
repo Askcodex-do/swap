@@ -8,5 +8,10 @@
 #
 # The headless build is deliberate: no GUI/Qt libraries, which keeps the
 # download and the eventual exe much smaller.
-numpy>=1.22,<2
-opencv-python-headless>=4.5,<5
+#
+# Pinned exactly. A range like >=4.5,<5 resolves to a different OpenCV on a
+# later run, so two builds of the same commit could bundle different library
+# bytes. 4.11.0.86 is the version the Windows CI build has been producing since
+# the Windows installer for Python 3.10.11, and it still supports 3.7/3.8.
+numpy==1.26.4
+opencv-python-headless==4.11.0.86
