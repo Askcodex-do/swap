@@ -109,6 +109,28 @@ PYTHONPATH=. python -m pytest tests/ -q
 * PyInstaller 6 does not auto-collect `secrets`, which strands numpy through
   `numpy.random`. See `hiddenimports` in `faceswap.spec`.
 
+## The exe is not byte-reproducible
+
+PyInstaller output is not deterministic. Two builds of the same commit produced
+`faceswap.exe` at 59,295,806, 59,295,807 and 59,295,809 bytes, and the zip
+around it varied by a few bytes to match. Nothing in the source changed.
+
+Two consequences worth remembering:
+
+* **A rebuild is a different artifact.** Do not re-run a build for a version
+  whose release is already published: `gh release upload --clobber` will replace
+  the asset and the size and sha256 will no longer match whatever was quoted
+  earlier. Only rebuild when there is a source change to ship.
+* **Verify by hash, never by size.** A few bytes of drift is normal between
+  builds, so size alone cannot tell a correct package from a stale or truncated
+  one. The pipeline therefore uploads `RELEASE_ASSET` by name rather than a
+  glob, refuses to proceed if any other `faceswap-*-windows-x86_64.zip` is
+  present, and the `verify-artifact` job re-downloads the published artifact and
+  compares its sha256 with the build's own.
+
+Sizes get quoted two ways, which causes confusion: 58,776,291 bytes is 58.78 MB
+but 56.05 MiB. The build summary records both.
+
 ## Verifying a release artifact
 
 The exe is built on CI, so "the build passed" is not proof that the shipped
