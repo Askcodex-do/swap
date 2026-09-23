@@ -484,10 +484,4 @@ jobs:
           print()
           print("OK: the downloadable artifact is byte-for-byte the freshly built package")
           PY
-        env:
-          ASSET: ${{ needs.build-windows.outputs.asset }}
-          SIZE: ${{ needs.build-windows.outputs.size }}
-          SHA: ${{ needs.build-windows.outputs.sha }}
-          EXE_SIZE: ${{ needs.build-windows.outputs.exe_size }}
-          EXE_SHA: ${{ needs.build-windows.outputs.exe_sha }}
 
