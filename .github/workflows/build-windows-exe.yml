@@ -32,6 +32,13 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    outputs:
+      asset: ${{ steps.package.outputs.asset }}
+      size: ${{ steps.package.outputs.size }}
+      sha: ${{ steps.package.outputs.sha }}
+      exe_size: ${{ steps.package.outputs.exe_size }}
+      exe_sha: ${{ steps.package.outputs.exe_sha }}
+
     steps:
       - name: Work out the versioned asset name from the tag
         shell: bash
@@ -168,6 +175,7 @@ jobs:
           PY
 
       - name: Package the Windows artifact
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -187,25 +195,117 @@ jobs:
               for src, arc in files:
                   z.write(src, arc)
 
-          digest = hashlib.sha256(open(name, "rb").read()).hexdigest()
+          def digest(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as fh:
+                  for chunk in iter(lambda: fh.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
           size = os.path.getsize(name)
-          print(f"packaged {name}: {size:,} bytes")
-          print(f"sha256: {digest}")
+          zip_sha = digest(name)
+          exe_size = os.path.getsize("dist/faceswap.exe")
+          exe_sha = digest("dist/faceswap.exe")
+
+          print(f"packaged {name}")
+          print(f"  bytes             : {size:,}")
+          print(f"  MiB               : {size / 1048576:.2f}")
+          print(f"  zip sha256        : {zip_sha}")
+          print(f"  inner faceswap.exe: {exe_size:,} bytes")
+          print(f"  exe sha256        : {exe_sha}")
+
+          # Both units are recorded because a size quoted in MB rather than MiB
+          # differs by ~4.9%, which is enough for a 58.8 MB zip to be described
+          # as a "56.1 MB package" and look like a different file.
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"ZIP_SIZE={size}\n")
+              fh.write(f"ZIP_SHA256={zip_sha}\n")
+              fh.write(f"EXE_SIZE={exe_size}\n")
+              fh.write(f"EXE_SHA256={exe_sha}\n")
+
+          # GITHUB_ENV only affects later steps, so the outputs the verify job
+          # needs are written here directly rather than echoed by the shell.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"asset={name}\n")
+              fh.write(f"size={size}\n")
+              fh.write(f"sha={zip_sha}\n")
+              fh.write(f"exe_size={exe_size}\n")
+              fh.write(f"exe_sha={exe_sha}\n")
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
               fh.write("## Windows build\n\n")
               fh.write(f"- asset: `{name}`\n")
-              fh.write(f"- size: {size:,} bytes\n")
-              fh.write(f"- sha256: `{digest}`\n")
+              fh.write(f"- size: {size:,} bytes ({size / 1048576:.2f} MiB)\n")
+              fh.write(f"- zip sha256: `{zip_sha}`\n")
+              fh.write(f"- inner `faceswap.exe`: {exe_size:,} bytes\n")
+              fh.write(f"- exe sha256: `{exe_sha}`\n")
               fh.write("- `dist/faceswap.exe` verified as PE/MZ console x86-64\n")
           PY
 
+      - name: Verify the package is the one just built, and no stale zip is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, os, sys, zipfile
+
+          name = os.environ["RELEASE_ASSET"]
+          inner = os.environ["INNER_DIR"]
+          problems = []
+
+          # A zip left over from an earlier run in the workspace is exactly how
+          # the wrong package ends up attached to a release, so refuse to go on
+          # if anything other than this tag's package is lying around.
+          others = [p for p in sorted(glob.glob("faceswap-*-windows-x86_64.zip"))
+                    if p != name]
+          if not os.path.isfile(name):
+              problems.append(f"{name} was not produced")
+          if others:
+              problems.append(
+                  f"unexpected extra package(s) present: {others} - refusing to "
+                  "upload, so a stale build cannot be picked up"
+              )
+
+          if not problems:
+              with zipfile.ZipFile(name) as z:
+                  got = sorted(z.namelist())
+              want = sorted(
+                  f"{inner}/{n}" for n in ("faceswap.exe", "README.md", "WINDOWS.md")
+              )
+              if got != want:
+                  problems.append(f"zip holds {got}, expected {want}")
+              if os.path.getsize(name) != int(os.environ["ZIP_SIZE"]):
+                  problems.append("zip size changed since it was packaged")
+
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+
+          size = int(os.environ["ZIP_SIZE"])
+          print(f"OK: {name} is the only package and holds exactly the expected files")
+          print(f"    {size:,} bytes / {size / 1048576:.2f} MiB")
+          print(f"    sha256 {os.environ['ZIP_SHA256']}")
+          PY
+
+      # Uploads exactly the file the packaging step produced, by name. A glob
+      # like faceswap-*-windows-x86_64.zip would also sweep up a stale package
+      # from an earlier version if one were present; pinning the name means the
+      # artifact can only ever be this build.
+      #
+      # compression-level 0 stores it as-is: the zip is already deflated at
+      # level 9, so recompressing gains ~2 KB and only risks changing the bytes.
+      # The Actions artifact therefore stays byte-identical to the release asset,
+      # and its sha256 equals ZIP_SHA256.
       - name: Keep the zip as a workflow artifact too
         uses: actions/upload-artifact@v4
+        env:
+          RELEASE_ASSET: ${{ env.RELEASE_ASSET }}
         with:
           name: faceswap-windows-x86_64
-          path: faceswap-*-windows-x86_64.zip
+          path: ${{ env.RELEASE_ASSET }}
           if-no-files-found: error
+          compression-level: 0
 
       - name: Attach to the release without disturbing existing assets
         shell: bash
@@ -253,3 +353,141 @@ jobs:
             exit 1
           fi
           echo "OK: release now carries $count assets"
+
+  # Runs after the build job. Downloads the artifact back from Actions and
+  # checks it byte-for-byte against what the build produced, and that the exe
+  # inside it is the freshly built dist/faceswap.exe. Doing this in a separate
+  # job is deliberate: an in-job download can race the artifact upload and read
+  # back a partial archive.
+  verify-artifact:
+    needs: build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download the artifact exactly as a user would
+        uses: actions/download-artifact@v4
+        with:
+          name: faceswap-windows-x86_64
+          path: artifact-check
+
+      - name: Check the artifact is the exact package built, and read the exe hash
+        shell: bash
+        env:
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+          SIZE: ${{ needs.build-windows.outputs.size }}
+          SHA: ${{ needs.build-windows.outputs.sha }}
+          EXE_SIZE: ${{ needs.build-windows.outputs.exe_size }}
+          EXE_SHA: ${{ needs.build-windows.outputs.exe_sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, os, sys, zipfile
+
+          name = os.environ["ASSET"]
+          want_size = int(os.environ["SIZE"])
+          want_sha = os.environ["SHA"]
+          want_exe_size = int(os.environ["EXE_SIZE"])
+          want_exe_sha = os.environ["EXE_SHA"]
+
+          root = "artifact-check"
+          found = []
+          for dirpath, _dirs, filenames in os.walk(root):
+              for fn in filenames:
+                  found.append(os.path.join(dirpath, fn))
+
+          print("files in the downloaded artifact:")
+          for p in sorted(found):
+              print(f"  {os.path.relpath(p, root)}  {os.path.getsize(p):,} bytes")
+
+          problems = []
+          if len(found) != 1:
+              print(f"::error::artifact holds {len(found)} files, expected exactly 1")
+              sys.exit(1)
+
+          path = found[0]
+          got_name = os.path.relpath(path, root)
+          if got_name != name:
+              problems.append(f"artifact file is {got_name}, expected {name}")
+
+          size = os.path.getsize(path)
+          if size != want_size:
+              problems.append(
+                  f"artifact is {size:,} bytes but the build produced {want_size:,}"
+              )
+
+          h = hashlib.sha256()
+          with open(path, "rb") as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b""):
+                  h.update(chunk)
+          digest = h.hexdigest()
+          if digest != want_sha:
+              problems.append(
+                  f"artifact sha256 {digest} does not match built zip {want_sha}"
+              )
+
+          # The exe that ships must be the one this run built, at the expected
+          # size and hash, and it must unpack to a real Windows PE image.
+          exe_sha_actual = None
+          exe_size_actual = None
+          with zipfile.ZipFile(path) as z:
+              exes = [n for n in z.namelist() if n.endswith("faceswap.exe")]
+              if len(exes) != 1:
+                  problems.append(f"expected one faceswap.exe, found {exes}")
+              else:
+                  eh = hashlib.sha256()
+                  exe_size_actual = 0
+                  head = b""
+                  with z.open(exes[0]) as fh:
+                      while True:
+                          chunk = fh.read(1 << 20)
+                          if not chunk:
+                              break
+                          if len(head) < 2:
+                              head += chunk[:2]
+                          eh.update(chunk)
+                          exe_size_actual += len(chunk)
+                  exe_sha_actual = eh.hexdigest()
+                  if head[:2] != b"MZ":
+                      problems.append(f"inner exe does not start with MZ: {head[:2]!r}")
+                  if exe_size_actual != want_exe_size:
+                      problems.append(
+                          f"inner exe is {exe_size_actual:,} bytes, build made "
+                          f"{want_exe_size:,}"
+                      )
+                  if exe_sha_actual != want_exe_sha:
+                      problems.append(
+                          f"inner exe sha256 {exe_sha_actual} does not match built "
+                          f"{want_exe_sha}"
+                      )
+
+          print()
+          print(f"artifact  : {got_name}")
+          print(f"  size    : {size:,} bytes ({size / 1048576:.2f} MiB)")
+          print(f"  sha256  : {digest}")
+          print(f"inner exe : {exe_size_actual:,} bytes  MZ image")
+          print(f"  sha256  : {exe_sha_actual}")
+
+          if problems:
+              for p in problems:
+                  print(f"::error::{p}")
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write("## Uploaded artifact verified\n\n")
+              fh.write(f"- file: `{got_name}`\n")
+              fh.write(f"- size: {size:,} bytes ({size / 1048576:.2f} MiB)\n")
+              fh.write(f"- zip sha256: `{digest}`\n")
+              fh.write(f"- inner `faceswap.exe`: {exe_size_actual:,} bytes\n")
+              fh.write(f"- exe sha256: `{exe_sha_actual}`\n")
+              fh.write("- artifact bytes == build bytes, exe is the freshly built dist image\n")
+
+          print()
+          print("OK: the downloadable artifact is byte-for-byte the freshly built package")
+          PY
+        env:
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+          SIZE: ${{ needs.build-windows.outputs.size }}
+          SHA: ${{ needs.build-windows.outputs.sha }}
+          EXE_SIZE: ${{ needs.build-windows.outputs.exe_size }}
+          EXE_SHA: ${{ needs.build-windows.outputs.exe_sha }}
+
