@@ -109,6 +109,26 @@ PYTHONPATH=. python -m pytest tests/ -q
 * PyInstaller 6 does not auto-collect `secrets`, which strands numpy through
   `numpy.random`. See `hiddenimports` in `faceswap.spec`.
 
+## Verifying a release artifact
+
+The exe is built on CI, so "the build passed" is not proof that the shipped
+binary is the code you think it is. To check a downloaded zip:
+
+* `MZ` at 0, a `PE\0\0` signature at the offset stored at `0x3c`, machine
+  `0x8664`, optional-header magic `0x20b` (PE32+) and subsystem 3 (console)
+  confirm a real Windows x86-64 console binary rather than a zip of scripts.
+* `VCRUNTIME140.dll` and `python310.dll` are bundled inside the exe. That is why
+  it runs on a bare Windows 8.1 with no VC++ redistributable - if a future
+  PyInstaller change stops bundling them, the exe will start failing on clean
+  machines and this is the check that catches it.
+* The bundled `README.md` and `WINDOWS.md` are copied from the build commit, so
+  searching them for wording that only exists in the new version is a cheap and
+  reliable way to prove which commit produced the binary.
+* The CArchive TOC starts at `cookie - tocLen`, **not** at `cookie - toc`
+  (the `toc` field in the cookie points into the signature area and yields
+  garbage names). Reading the whole exe into memory on this sandbox triggers a
+  fatal restart, so scan it in 1 MB chunks with a small overlap instead.
+
 ## Tuning defaults
 
 `SwapOptions` defaults were chosen from measurement, not taste:
